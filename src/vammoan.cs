@@ -26,13 +26,15 @@ namespace VAMMoanPlugin
 
     private Voice voice;
     private Voices voices;
-    private JSONStorableActionStringChooser voiceChoice;
+    private JSONStorableStringChooser voiceChoice;
 
     private JSONStorableString voiceInfos;
     private JSONStorableString stateInfos;
     public JSONStorableStringChooser ArousalMode;
 
     private JSONStorableFloat VAMMVolume;
+    private JSONStorableFloat VAMMBasePitch;
+    private JSONStorableFloat VAMMPitchRandomness;
     private JSONStorableFloat VAMMPitch;
     private JSONStorableFloat VAMMPause;
     private JSONStorableBool VAMMAutoJaw;
@@ -151,6 +153,15 @@ namespace VAMMoanPlugin
     private float minLastCollisionTime = 0.8f; // Minimum time in interactive mode to swap currentArousal and play a new intensity instead of breathing
     private float maleCollisionTimeout = 0.135f; // We're on a collision (not trigger) system, the amount of collision event has to be controlled
 
+    private const int sampleWindow = 1024;
+    private float[] clipSampleData = new float[sampleWindow];
+    private float nextAudioSample = 0f;
+    private float currentClipPlayingTimestamp = 0f;
+
+    private const float voicePeakSmoothingFactorUp = 0.5f;
+    private const float voicePeakSmoothingFactorDown = 0.1f;
+    private float smoothedVolumeValue = 0f;
+
     private float vammTimer = 0f;
 
     private float breathPeriod;
@@ -253,6 +264,8 @@ namespace VAMMoanPlugin
 
     // ** All transition actions ( updated every frame )
     private EventTrigger breathingTrigger;
+    private EventTrigger lipSyncTrigger;
+    private EventTrigger smoothedVolumeTrigger;
 
     // All accessible Storable for scripting purposes
     public JSONStorableFloat VAMMValue_CurrentArousal;
@@ -304,11 +317,7 @@ namespace VAMMoanPlugin
 
         voiceInfos = new JSONStorableString("VoiceInfos", "");
         UIDynamic voiceinfosTextfield = CreateTextField(voiceInfos, false);
-        voiceinfosTextfield.height = 200.0f;
-
-        stateInfos = new JSONStorableString("Stateinfos", "");
-        UIDynamic stateinfosTextfield = CreateTextField(stateInfos, false);
-        stateinfosTextfield.height = 135.0f;
+        voiceinfosTextfield.height = 220.0f;
 
         List<string> ModesList = new List<string>();
         ModesList.Add("Manual");
@@ -316,9 +325,13 @@ namespace VAMMoanPlugin
 
         ArousalMode = new JSONStorableStringChooser("arousalMode", ModesList, defaultMode, "Mode", switchArousalModeCallback);
         RegisterStringChooser(ArousalMode);
-        UIDynamicPopup arousalModePopup = CreatePopup(ArousalMode);
+        UIDynamicPopup arousalModePopup = CreatePopup(ArousalMode, false);
         arousalModePopup.popup.topButton.image.color = new Color(0.35f, 0.60f, 0.65f);
         arousalModePopup.popup.selectColor = new Color(0.35f, 0.60f, 0.65f);
+
+        stateInfos = new JSONStorableString("Stateinfos", "");
+        UIDynamic stateinfosTextfield = CreateTextField(stateInfos, false);
+        stateinfosTextfield.height = 100.0f;
 
         JSONStorableString helpText = new JSONStorableString("Help",
           "<color=#000><size=35><b>VAMMoan help</b></size></color>\n\n" +
@@ -349,7 +362,7 @@ namespace VAMMoanPlugin
           "</color>"
         );
         helpTextfield = CreateTextField(helpText, false);
-        helpTextfield.height = 650.0f;
+        helpTextfield.height = 530.0f;
 
         CreateSpacer();
 
@@ -417,6 +430,142 @@ namespace VAMMoanPlugin
           previewIntensity6Btn.button.onClick.AddListener(() => { setArousal(6.0f); });
         }
 
+        CreateSpacer(false);
+
+        // TITLE ADVANCED
+        createStaticDescriptionText("Advanced options", "<color=#000><size=35><b>ADVANCED OPTIONS</b></size></color>", false, 40);
+
+        // Random Moans trigger
+        enableRandMoanTrigger = new JSONStorableBool("Enable randomized playback", false);
+        enableRandMoanTrigger.storeType = JSONStorableParam.StoreType.Full;
+        CreateToggle(enableRandMoanTrigger, false);
+        RegisterBool(enableRandMoanTrigger);
+
+        randMoanTriggerOccurenceMin = new JSONStorableFloat("Occurence Min", 3.0f, (val) => { randMoanTriggerOccurenceMin.valNoCallback = Mathf.Round(val); randMoanTriggerOccurenceMinCallback(val); randMoanTriggerOccurenceMax.SetVal(Mathf.Max(randMoanTriggerOccurenceMax.val, val)); }, 1.0f, 20.0f);
+        RegisterFloat(randMoanTriggerOccurenceMin);
+        CreateSlider(randMoanTriggerOccurenceMin, false);
+
+        randMoanTriggerOccurenceMax = new JSONStorableFloat("Occurence Max", 8.0f, (val) => { randMoanTriggerOccurenceMax.valNoCallback = Mathf.Round(val); randMoanTriggerOccurenceMaxCallback(val); randMoanTriggerOccurenceMin.SetVal(Mathf.Min(randMoanTriggerOccurenceMin.val, val)); }, 1.0f, 20.0f);
+        RegisterFloat(randMoanTriggerOccurenceMax);
+        CreateSlider(randMoanTriggerOccurenceMax, false);
+
+        randMoanTriggerChance = new JSONStorableFloat("Playback chance", 0.85f, randMoanTriggerChanceCallback, 0.1f, 1f);
+        RegisterFloat(randMoanTriggerChance);
+        CreateSlider(randMoanTriggerChance, false);
+
+        List<string> rndMoanTriggerList = new List<string>();
+        rndMoanTriggerList.Add("Breathing");
+        rndMoanTriggerList.Add("Intensity 0");
+        rndMoanTriggerList.Add("Intensity 1");
+        rndMoanTriggerList.Add("Intensity 2");
+        rndMoanTriggerList.Add("Intensity 3");
+        rndMoanTriggerList.Add("Intensity 4");
+        rndMoanTriggerList.Add("Current Intensity -1");
+        rndMoanTriggerList.Add("Current Intensity -2");
+        rndMoanTriggerList.Add("Current Intensity +1");
+        rndMoanTriggerList.Add("Current Intensity +2");
+        rndMoanTriggerList.Add("Current Intensity +/-1");
+        rndMoanTriggerList.Add("Current Intensity +/-2");
+        rndMoanTriggerList.Add("Current Intensity +/-X");
+        randMoanTriggerTypeChoice = new JSONStorableStringChooser("Playback Type", rndMoanTriggerList, "Current Intensity -1", "Playback Type");
+        RegisterStringChooser(randMoanTriggerTypeChoice);
+        UIDynamicPopup randMoanTriggerPopup = CreateScrollablePopup(randMoanTriggerTypeChoice, false);
+        randMoanTriggerPopup.popup.topButton.image.color = new Color(0.35f, 0.60f, 0.65f);
+        randMoanTriggerPopup.popup.selectColor = new Color(0.35f, 0.60f, 0.65f);
+
+        randMoanTriggerHelp = createStaticDescriptionText("Rand trigger description", "", false, 195);
+
+        CreateSpacer(false);
+
+        // TITLE TRIGGERS
+        createStaticDescriptionText("Triggers", "<color=#000><size=35><b>TRIGGERS</b></size></color>", false, 40);
+        createStaticDescriptionText("Triggers description", "<color=#000><size=26><i><b>Create triggers based on VAMMoan events.</b> By selecting triggers in the dropdown below, you can add actions that will trigger depending on VAMM intensities or events.</i></size></color>", false, 165);
+
+        editTriggersList = new List<string>();
+        editTriggersList.Add("Select a trigger to edit");
+        editTriggersList.Add("Lip sync");
+        editTriggersList.Add("Smoothed vocal volume");
+        editTriggersList.Add("Start disabled");
+        editTriggersList.Add("Start breathing");
+        editTriggersList.Add("Start kissing");
+        editTriggersList.Add("Start blowjob");
+        editTriggersList.Add("Start intensity 0");
+        editTriggersList.Add("Start intensity 1");
+        editTriggersList.Add("Start intensity 2");
+        editTriggersList.Add("Start intensity 3");
+        editTriggersList.Add("Start intensity 4");
+        editTriggersList.Add("When intensity lowered");
+        editTriggersList.Add("When intensity increased");
+        editTriggersList.Add("Start orgasm");
+        editTriggersList.Add("End orgasm");
+        editTriggersList.Add("While breathing");
+
+        editTriggerChoice = new JSONStorableStringChooser("triggers", editTriggersList, editTriggerListDefault, "Triggers", (string choice) =>
+        {
+          switch (choice)
+          {
+            case "Lip sync":
+              lipSyncTrigger.OpenPanelTransition();
+              break;
+            case "Smoothed vocal volume":
+              smoothedVolumeTrigger.OpenPanelTransition();
+              break;
+            case "Start disabled":
+              startDisabledTrigger.OpenPanelActionStart();
+              break;
+            case "Start breathing":
+              startBreathingTrigger.OpenPanelActionStart();
+              break;
+            case "Start kissing":
+              startKissingTrigger.OpenPanelActionStart();
+              break;
+            case "Start blowjob":
+              startBlowjobTrigger.OpenPanelActionStart();
+              break;
+            case "Start intensity 0":
+              startIntensity0Trigger.OpenPanelActionStart();
+              break;
+            case "Start intensity 1":
+              startIntensity1Trigger.OpenPanelActionStart();
+              break;
+            case "Start intensity 2":
+              startIntensity2Trigger.OpenPanelActionStart();
+              break;
+            case "Start intensity 3":
+              startIntensity3Trigger.OpenPanelActionStart();
+              break;
+            case "Start intensity 4":
+              startIntensity4Trigger.OpenPanelActionStart();
+              break;
+            case "When intensity lowered":
+              intensityLoweredTrigger.OpenPanelActionStart();
+              break;
+            case "When intensity increased":
+              intensityIncreasedTrigger.OpenPanelActionStart();
+              break;
+            case "Start orgasm":
+              reachOrgasmTrigger.OpenPanelActionStart();
+              break;
+            case "End orgasm":
+              endOrgasmTrigger.OpenPanelActionStart();
+              break;
+            case "While breathing":
+              breathingTrigger.OpenPanelTransition();
+              break;
+          }
+          editTriggerChoice.val = editTriggerListDefault;
+        })
+        { isStorable = false };
+        RegisterStringChooser(editTriggerChoice);
+        UIDynamicPopup editTriggerPopup = CreateScrollablePopup(editTriggerChoice, false);
+        editTriggerPopup.popup.topButton.image.color = new Color(0.35f, 0.60f, 0.65f);
+        editTriggerPopup.popup.selectColor = new Color(0.35f, 0.60f, 0.65f);
+
+        CreateSpacer(false);
+
+
+
+
         /* ********************************* */
         /* **** RIGHT UI                **** */
         /* ********************************* */
@@ -430,10 +579,20 @@ namespace VAMMoanPlugin
         CreateSlider(VAMMVolume, true);
         VAMMVolume.val = headAudioSource.GetFloatParamValue("volume");
 
-        VAMMPitch = new JSONStorableFloat("Voice pitch", 1f, VAMMPitchCallback, 0.1f, 3f);
-        RegisterFloat(VAMMPitch);
-        CreateSlider(VAMMPitch, true);
-        VAMMPitch.val = headAudioSource.GetFloatParamValue("pitch");
+        VAMMPitch = new JSONStorableFloat("Current pitch", 1f, VAMMPitchCallback, 0.1f, 3f);
+
+        VAMMBasePitch = new JSONStorableFloat("Base pitch", 1f, VAMMBasePitchCallback, 0.1f, 3f);
+        RegisterFloat(VAMMBasePitch);
+        CreateSlider(VAMMBasePitch, true);
+
+        VAMMPitchRandomness = new JSONStorableFloat("Pitch randomness", 0f, VAMMPitchRandomnessCallback, -0.1f, 0.1f);
+        RegisterFloat(VAMMPitchRandomness);
+        CreateSlider(VAMMPitchRandomness, true);
+
+        VAMMPause = new JSONStorableFloat("Pause between moans", 0f, VAMMPauseCallback, 0f, 1.5f);
+        CreateSlider(VAMMPause, true);
+
+        CreateSpacer(true);
 
         VAMMReverbEnabled = new JSONStorableBool("Enable Reverb (VAMAtmosphere)", false, VAMMReverbEnabledCallback);
         VAMMReverbEnabled.storeType = JSONStorableParam.StoreType.Full;
@@ -446,6 +605,10 @@ namespace VAMMoanPlugin
         CreateToggle(VAMMBreathingEnabled, true);
         RegisterBool(VAMMBreathingEnabled);
 
+        VAMMBreathingScale = new JSONStorableFloat("Breathing scale", 1f, VAMMBreathingScaleCallback, 0.1f, 1f);
+        RegisterFloat(VAMMBreathingScale);
+        CreateSlider(VAMMBreathingScale, true);
+
         VAMMAutoJaw = new JSONStorableBool("Enable auto-jaw animation", false, VAMMAutoJawCallback);
         VAMMAutoJaw.storeType = JSONStorableParam.StoreType.Full;
         CreateToggle(VAMMAutoJaw, true);
@@ -453,7 +616,7 @@ namespace VAMMoanPlugin
         VAMMAutoJaw.val = JawControlAJ.GetBoolParamValue("driveXRotationFromAudioSource"); // Reading the parameters from the normal tabs
         AutoJawMouthMorphsJS.SetBoolParamValue("enabled", VAMMAutoJaw.val); // Also settings the morphs to the same value
 
-        UIDynamicButton setOptimalJawParams = CreateButton("Set optimal auto-jaw animation parameters", true);
+        UIDynamicButton setOptimalJawParams = CreateButton("Set optimal auto-jaw parameters", true);
         if (setOptimalJawParams != null)
         {
           setOptimalJawParams.button.onClick.AddListener(setOptimalJawParamsCallback);
@@ -573,7 +736,7 @@ namespace VAMMoanPlugin
         BJEditAdvOptionsCallback(false);
 
         CreateSpacer(true);
-
+        
         // TITLE MANUAL
         createStaticDescriptionText("Manual mode options", "<color=#000><size=35><b>MANUAL MODE</b></size></color>", true, 40);
 
@@ -618,143 +781,6 @@ namespace VAMMoanPlugin
 
         // Creating my triggers
         initTriggers();
-
-        // TITLE ADVANCED
-        createStaticDescriptionText("Advanced options", "<color=#000><size=35><b>ADVANCED OPTIONS</b></size></color>", true, 40);
-
-        // Breathing scale
-        VAMMBreathingScale = new JSONStorableFloat("Breathing scale", 1f, VAMMBreathingScaleCallback, 0.1f, 1f);
-        RegisterFloat(VAMMBreathingScale);
-        CreateSlider(VAMMBreathingScale, true);
-
-        createStaticDescriptionText("Breathing scale description", "<color=#000><size=26><i><b>Changes how much the breathing animations scales.</b> 1 means it will be animated to it's maximum depth.</i></size></color>", true, 95);
-
-        // Pause between samples
-        VAMMPause = new JSONStorableFloat("Pause between moans", 0f, VAMMPauseCallback, 0f, 1.5f);
-        CreateSlider(VAMMPause, true);
-
-        createStaticDescriptionText("Pause description", "<color=#000><size=26><i><b>Adds a tiny additional pause between moans.</b> 0 means no pause, 1 is a one second pause. It can be used to slow down the pace of the moans during an animation.</i></size></color>", true, 125);
-
-        CreateSpacer(true);
-
-        // Random Moans trigger
-        enableRandMoanTrigger = new JSONStorableBool("Enable randomized moan playback", false);
-        enableRandMoanTrigger.storeType = JSONStorableParam.StoreType.Full;
-        CreateToggle(enableRandMoanTrigger, true);
-        RegisterBool(enableRandMoanTrigger);
-
-        randMoanTriggerOccurenceMin = new JSONStorableFloat("Occurence Min", 3.0f, (val) => { randMoanTriggerOccurenceMin.valNoCallback = Mathf.Round(val); randMoanTriggerOccurenceMinCallback(val); randMoanTriggerOccurenceMax.SetVal(Mathf.Max(randMoanTriggerOccurenceMax.val, val)); }, 1.0f, 20.0f);
-        RegisterFloat(randMoanTriggerOccurenceMin);
-        CreateSlider(randMoanTriggerOccurenceMin, true);
-
-        randMoanTriggerOccurenceMax = new JSONStorableFloat("Occurence Max", 8.0f, (val) => { randMoanTriggerOccurenceMax.valNoCallback = Mathf.Round(val); randMoanTriggerOccurenceMaxCallback(val); randMoanTriggerOccurenceMin.SetVal(Mathf.Min(randMoanTriggerOccurenceMin.val, val)); }, 1.0f, 20.0f);
-        RegisterFloat(randMoanTriggerOccurenceMax);
-        CreateSlider(randMoanTriggerOccurenceMax, true);
-
-        randMoanTriggerChance = new JSONStorableFloat("Playback chance", 0.85f, randMoanTriggerChanceCallback, 0.1f, 1f);
-        RegisterFloat(randMoanTriggerChance);
-        CreateSlider(randMoanTriggerChance, true);
-
-        List<string> rndMoanTriggerList = new List<string>();
-        rndMoanTriggerList.Add("Breathing");
-        rndMoanTriggerList.Add("Intensity 0");
-        rndMoanTriggerList.Add("Intensity 1");
-        rndMoanTriggerList.Add("Intensity 2");
-        rndMoanTriggerList.Add("Intensity 3");
-        rndMoanTriggerList.Add("Intensity 4");
-        rndMoanTriggerList.Add("Current Intensity -1");
-        rndMoanTriggerList.Add("Current Intensity -2");
-        rndMoanTriggerList.Add("Current Intensity +1");
-        rndMoanTriggerList.Add("Current Intensity +2");
-        rndMoanTriggerList.Add("Current Intensity +/-1");
-        rndMoanTriggerList.Add("Current Intensity +/-2");
-        rndMoanTriggerList.Add("Current Intensity +/-X");
-        randMoanTriggerTypeChoice = new JSONStorableStringChooser("Playback Type", rndMoanTriggerList, "Current Intensity -1", "Playback Type");
-        RegisterStringChooser(randMoanTriggerTypeChoice);
-        UIDynamicPopup randMoanTriggerPopup = CreateScrollablePopup(randMoanTriggerTypeChoice, true);
-        randMoanTriggerPopup.popup.topButton.image.color = new Color(0.35f, 0.60f, 0.65f);
-        randMoanTriggerPopup.popup.selectColor = new Color(0.35f, 0.60f, 0.65f);
-
-        randMoanTriggerHelp = createStaticDescriptionText("Rand trigger description", "", true, 195);
-
-        CreateSpacer(true);
-
-        createStaticDescriptionText("Triggers", "<color=#000><size=35><b>TRIGGERS</b></size></color>", true, 40);
-        createStaticDescriptionText("Triggers description", "<color=#000><size=26><i><b>Create triggers based on VAMMoan events.</b> By selecting triggers in the dropdown below, you can add actions that will trigger depending on VAMM intensities or events.</i></size></color>", true, 165);
-
-        editTriggersList = new List<string>();
-        editTriggersList.Add("Select a trigger to edit");
-        editTriggersList.Add("Start disabled");
-        editTriggersList.Add("Start breathing");
-        editTriggersList.Add("Start kissing");
-        editTriggersList.Add("Start blowjob");
-        editTriggersList.Add("Start intensity 0");
-        editTriggersList.Add("Start intensity 1");
-        editTriggersList.Add("Start intensity 2");
-        editTriggersList.Add("Start intensity 3");
-        editTriggersList.Add("Start intensity 4");
-        editTriggersList.Add("When intensity lowered");
-        editTriggersList.Add("When intensity increased");
-        editTriggersList.Add("Start orgasm");
-        editTriggersList.Add("End orgasm");
-        editTriggersList.Add("While breathing");
-
-        editTriggerChoice = new JSONStorableStringChooser("triggers", editTriggersList, editTriggerListDefault, "Triggers", (string choice) =>
-        {
-          switch (choice)
-          {
-            case "Start disabled":
-              startDisabledTrigger.OpenPanelActionStart();
-              break;
-            case "Start breathing":
-              startBreathingTrigger.OpenPanelActionStart();
-              break;
-            case "Start kissing":
-              startKissingTrigger.OpenPanelActionStart();
-              break;
-            case "Start blowjob":
-              startBlowjobTrigger.OpenPanelActionStart();
-              break;
-            case "Start intensity 0":
-              startIntensity0Trigger.OpenPanelActionStart();
-              break;
-            case "Start intensity 1":
-              startIntensity1Trigger.OpenPanelActionStart();
-              break;
-            case "Start intensity 2":
-              startIntensity2Trigger.OpenPanelActionStart();
-              break;
-            case "Start intensity 3":
-              startIntensity3Trigger.OpenPanelActionStart();
-              break;
-            case "Start intensity 4":
-              startIntensity4Trigger.OpenPanelActionStart();
-              break;
-            case "When intensity lowered":
-              intensityLoweredTrigger.OpenPanelActionStart();
-              break;
-            case "When intensity increased":
-              intensityIncreasedTrigger.OpenPanelActionStart();
-              break;
-            case "Start orgasm":
-              reachOrgasmTrigger.OpenPanelActionStart();
-              break;
-            case "End orgasm":
-              endOrgasmTrigger.OpenPanelActionStart();
-              break;
-            case "While breathing":
-              breathingTrigger.OpenPanelTransition();
-              break;
-          }
-          editTriggerChoice.val = editTriggerListDefault;
-        })
-        { isStorable = false };
-        RegisterStringChooser(editTriggerChoice);
-        UIDynamicPopup editTriggerPopup = CreateScrollablePopup(editTriggerChoice, true);
-        editTriggerPopup.popup.topButton.image.color = new Color(0.35f, 0.60f, 0.65f);
-        editTriggerPopup.popup.selectColor = new Color(0.35f, 0.60f, 0.65f);
-
-        CreateSpacer(true);
 
         // TITLE SPATIALIZATION OPTIONS
         createStaticDescriptionText("Spatialization options", "<color=#000><size=35><b>SPATIALIZATION OPTIONS</b></size></color>", true, 40);
@@ -1140,13 +1166,50 @@ namespace VAMMoanPlugin
       // Voice disabled, we don't do nothin'
       if (currentArousal == -10.0f) return;
 
+      if (vammTimer >= nextAudioSample)
+      {
+        float clipLoudness = 0f;
+
+        if (currentClipPlaying != null)
+        {
+          float multiplier = 0.1f * float.Parse(voice.voiceConfig["config"]["settings"]["audioDriveMultiplier"].Value);
+          float playTime = vammTimer - currentClipPlayingTimestamp;
+          int timeSamples = (int)(playTime * currentClipPlaying.frequency);
+
+          currentClipPlaying.GetData(clipSampleData, timeSamples);
+          foreach (float sample in clipSampleData)
+          {
+            clipLoudness += Mathf.Abs(sample);
+          }
+					// basically scales samples between 0-1
+          clipLoudness *= multiplier;
+          clipLoudness /= (float)sampleWindow;
+					// interpolation function with steep ramp up seems to work well
+					clipLoudness = MathHelper.Tanh(1.5f * (clipLoudness - 0.05f));
+          clipLoudness = Mathf.Clamp01(clipLoudness);
+        }
+
+        bool increasing = clipLoudness > smoothedVolumeValue;
+        float targetLoudness = increasing ? clipLoudness : 0f;
+        float smoothingFactor = increasing ? voicePeakSmoothingFactorUp : voicePeakSmoothingFactorDown;
+        smoothedVolumeValue = (1f - smoothingFactor) * smoothedVolumeValue + smoothingFactor * targetLoudness;
+
+        smoothedVolumeTrigger.active = true;
+        smoothedVolumeTrigger.TriggerTransition(smoothedVolumeValue);
+
+        lipSyncTrigger.active = true;
+        lipSyncTrigger.TriggerTransition(clipLoudness);
+
+        nextAudioSample = vammTimer + 0.05f;
+      }
+
       // Checking the orgasm state
       if (canPlayOrgasm())
       {
         nextOrgasmCheck = vammTimer + 0.2f;
         if (intAr >= 5.0f || currentArousal == 5.0f)
         {
-          AudioClip oClip = currentClipPlaying = voice.GetTriggeredAudioOrgasm();
+          AudioClip oClip = voice.GetTriggeredAudioOrgasm();
 
           if (oClip != null)
           {
@@ -1271,7 +1334,7 @@ namespace VAMMoanPlugin
         {
           if (randMoanTriggerTypeChoice.val == "Breathing")
           {
-            clip = currentClipPlaying = voice.GetTriggeredAudioBreath();
+            clip = voice.GetTriggeredAudioBreath();
           }
           else if (randMoanTriggerTypeChoice.val == "Intensity 0" || randMoanTriggerTypeChoice.val == "Intensity 1" || randMoanTriggerTypeChoice.val == "Intensity 2" || randMoanTriggerTypeChoice.val == "Intensity 3" || randMoanTriggerTypeChoice.val == "Intensity 4")
           {
@@ -1279,45 +1342,45 @@ namespace VAMMoanPlugin
             char[] separators = new char[] { ' ' };
             string[] typeChoiceArray = typeChoiceStr.Split(separators);
             float targetIntensity = float.Parse(typeChoiceArray[1]);
-            clip = currentClipPlaying = voice.GetTriggeredAudioMoan(targetIntensity);
+            clip = voice.GetTriggeredAudioMoan(targetIntensity);
           }
           else if (randMoanTriggerTypeChoice.val == "Current Intensity -1")
           {
             float targetIntensity = UnityEngine.Mathf.Clamp(triggeredArousal - 1f, 0f, 3f);
-            clip = currentClipPlaying = voice.GetTriggeredAudioMoan(targetIntensity);
+            clip = voice.GetTriggeredAudioMoan(targetIntensity);
           }
           else if (randMoanTriggerTypeChoice.val == "Current Intensity -2")
           {
             float targetIntensity = UnityEngine.Mathf.Clamp(triggeredArousal - 2f, 0f, 3f);
-            clip = currentClipPlaying = voice.GetTriggeredAudioMoan(targetIntensity);
+            clip = voice.GetTriggeredAudioMoan(targetIntensity);
           }
           else if (randMoanTriggerTypeChoice.val == "Current Intensity +1")
           {
             float targetIntensity = UnityEngine.Mathf.Clamp(triggeredArousal + 1f, 1f, 4f);
-            clip = currentClipPlaying = voice.GetTriggeredAudioMoan(targetIntensity);
+            clip = voice.GetTriggeredAudioMoan(targetIntensity);
           }
           else if (randMoanTriggerTypeChoice.val == "Current Intensity +2")
           {
             float targetIntensity = UnityEngine.Mathf.Clamp(triggeredArousal + 2f, 1f, 4f);
-            clip = currentClipPlaying = voice.GetTriggeredAudioMoan(targetIntensity);
+            clip = voice.GetTriggeredAudioMoan(targetIntensity);
           }
           else if (randMoanTriggerTypeChoice.val == "Current Intensity +/-1")
           {
             float randIntensityMoan = UnityEngine.Random.Range(0, 2) * 2 - 1;
             float targetIntensity = UnityEngine.Mathf.Clamp(triggeredArousal + randIntensityMoan, 0f, 4f);
-            clip = currentClipPlaying = voice.GetTriggeredAudioMoan(targetIntensity);
+            clip = voice.GetTriggeredAudioMoan(targetIntensity);
           }
           else if (randMoanTriggerTypeChoice.val == "Current Intensity +/-2")
           {
             float randIntensityMoan = (UnityEngine.Random.Range(0, 2) * 2 - 1) * 2;
             float targetIntensity = UnityEngine.Mathf.Clamp(triggeredArousal + randIntensityMoan, 0f, 4f);
-            clip = currentClipPlaying = voice.GetTriggeredAudioMoan(targetIntensity);
+            clip = voice.GetTriggeredAudioMoan(targetIntensity);
           }
           else if (randMoanTriggerTypeChoice.val == "Current Intensity +/-X")
           {
             float randIntensityMoan = (UnityEngine.Random.Range(0, 2) * 2 - 1) * UnityEngine.Random.Range(1, 3);
             float targetIntensity = UnityEngine.Mathf.Clamp(triggeredArousal + randIntensityMoan, 0f, 4f);
-            clip = currentClipPlaying = voice.GetTriggeredAudioMoan(targetIntensity);
+            clip = voice.GetTriggeredAudioMoan(targetIntensity);
           }
 
 
@@ -1338,7 +1401,7 @@ namespace VAMMoanPlugin
           // Moans
           if (triggeredArousal >= 0.0f && triggeredArousal <= 4.0f)
           {
-            clip = currentClipPlaying = voice.GetTriggeredAudioMoan(triggeredArousal);
+            clip = voice.GetTriggeredAudioMoan(triggeredArousal);
             if (clip != null)
             {
               float delayBreathingEnd = (clip.length / Math.Abs(VAMMPitch.val)) + float.Parse(voice.voiceConfig["config"]["settings"]["overlapLengths"]["" + (int)currentArousal].Value); // Overlapping the previous clip - this one is used for the breathing animation to be synced with the sample 				
@@ -1356,7 +1419,7 @@ namespace VAMMoanPlugin
           }
           else if (triggeredArousal == 6.0f)
           {
-            clip = currentClipPlaying = voice.GetTriggeredAudioPerpetualOrgasm();
+            clip = voice.GetTriggeredAudioPerpetualOrgasm();
             if (clip != null)
             {
               float delayBreathingEnd = (clip.length / Math.Abs(VAMMPitch.val)) + float.Parse(voice.voiceConfig["config"]["settings"]["overlapLengths"]["6"].Value);
@@ -1372,7 +1435,7 @@ namespace VAMMoanPlugin
           }
           else if (currentArousal == -1.0f)
           {
-            clip = currentClipPlaying = voice.GetTriggeredAudioBreath();
+            clip = voice.GetTriggeredAudioBreath();
             if (clip != null)
             {
               float delayNextMoan =
@@ -1387,7 +1450,7 @@ namespace VAMMoanPlugin
           }
           else if (currentArousal == 100.0f)
           {
-            clip = currentClipPlaying = voice.GetTriggeredAudioKiss();
+            clip = voice.GetTriggeredAudioKiss();
             if (clip != null)
             {
               float delayNextMoan =
@@ -1546,8 +1609,12 @@ namespace VAMMoanPlugin
 
     public void PlayAudio(AudioClip clip)
     {
+      currentClipPlaying = clip;
+      currentClipPlayingTimestamp = vammTimer;
       if (clip != null)
       {
+        // Randomize the pitch based on user params
+        VAMMPitch.val = VAMMBasePitch.val + UnityEngine.Random.Range(-VAMMPitchRandomness.val, VAMMPitchRandomness.val);
         headAudioSource.audioSource.PlayOneShot(clip);
       }
     }
@@ -1724,6 +1791,12 @@ namespace VAMMoanPlugin
     {
       // Creating all my triggers and adding them to a global list (to easily control them and save them)
       allTriggers = new List<EventTrigger>();
+
+      lipSyncTrigger = new EventTrigger(this, "LipSyncActions");
+      allTriggers.Add(lipSyncTrigger);
+
+      smoothedVolumeTrigger = new EventTrigger(this, "SmoothedVolumeActions");
+      allTriggers.Add(smoothedVolumeTrigger);
 
       startDisabledTrigger = new EventTrigger(this, "StartDisabledActions");
       allTriggers.Add(startDisabledTrigger);
@@ -2234,6 +2307,16 @@ namespace VAMMoanPlugin
       headAudioSource.SetFloatParamValue("volume", volumeval);
     }
 
+    protected void VAMMBasePitchCallback(float pitchval)
+    {
+      VAMMPitch.val = pitchval;
+    }
+
+    protected void VAMMPitchRandomnessCallback(float randomnessval)
+    {
+      // Nothing for now
+    }
+
     protected void VAMMPitchCallback(float pitchval)
     {
       headAudioSource.SetFloatParamValue("pitch", pitchval);
@@ -2729,6 +2812,14 @@ namespace VAMMoanPlugin
       return filename.IndexOf(":/") >= 0;
     }
 
+    public static class MathHelper
+    {
+      public static float Tanh(float x)
+      {
+        return (Mathf.Exp(2 * x) - 1) / (Mathf.Exp(2 * x) + 1);
+      }
+    }
+
     // ===========================================================================================
     // TriggerHandler implementation for easier handling of custom triggers.
     // Essentially call this in your plugin init code:
@@ -2890,7 +2981,7 @@ namespace VAMMoanPlugin
         if (myNeedInit)
         {
           triggerActionsPanel.Find("Panel/Header Text").GetComponent<Text>().text = Name;
-          triggerActionsPanel.Find("Content/Tab2/Label").GetComponent<Text>().text = "Breathing Actions";
+          triggerActionsPanel.Find("Content/Tab2/Label").GetComponent<Text>().text = "Value Actions";
           triggerActionsPanel.Find("Content/Tab1").gameObject.SetActive(false);
           triggerActionsPanel.Find("Content/Tab2").gameObject.SetActive(true);
           triggerActionsPanel.Find("Content/Tab2").GetComponent<Toggle>().isOn = true;
