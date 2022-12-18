@@ -510,7 +510,7 @@ namespace VAMMoanPlugin
         {
           switch (choice)
           {
-            case "Vocal amplitude":
+            case "Fast vocal amplitude":
               vocalAmplitudeTrigger.OpenPanelTransition();
               break;
             case "Smoothed vocal amplitude":
