@@ -11,7 +11,7 @@ using Request = MeshVR.AssetLoader.AssetBundleFromFileRequest;
 using AssetBundles;
 using MVR;
 
-// VAMMoan v1.14
+// VAMMoan v1.21 - EDIT By ThatsLewd (NOT OFFICIAL NOR ENDORSED)
 //
 // Extensively based on Dollmaster plugin and on MacGruber's and AcidBubble's work
 // Thank you for all your great plugins guyz !
@@ -86,6 +86,7 @@ namespace VAMMoanPlugin
     private bool _PSLAllowed = true;
     private float _PSLLastVelocity = 0f;
     private AudioSource pelvicSlapAudioSource;
+    private AudioLowPassFilter pelvicSlapLPF;
     private GameObject _PSLTrigger01;
     private GameObject _PSLTrigger02;
     private Vector3 _PSLTrigger01DefaultPos = new Vector3(0f, -0.09f, 0.065f);
@@ -110,6 +111,7 @@ namespace VAMMoanPlugin
 
     private bool _SQSAllowed = true;
     private AudioSource squishesAudioSource;
+    private AudioLowPassFilter squishesLPF;
     /** SQUISHES END **/
 
     /** MOUTH/BJ START **/
@@ -132,6 +134,7 @@ namespace VAMMoanPlugin
 
     private bool _BJAllowed = true;
     private AudioSource mouthAudioSource;
+    private AudioLowPassFilter mouthLPF;
     /** MOUTH/BJ END **/
 
     private string defaultVoice = "Isabella";
@@ -264,8 +267,8 @@ namespace VAMMoanPlugin
 
     // ** All transition actions ( updated every frame )
     private EventTrigger breathingTrigger;
-    private EventTrigger lipSyncTrigger;
-    private EventTrigger smoothedVolumeTrigger;
+    private EventTrigger vocalAmplitudeTrigger;
+    private EventTrigger smoothedVocalAmplitudeTrigger;
 
     // All accessible Storable for scripting purposes
     public JSONStorableFloat VAMMValue_CurrentArousal;
@@ -274,6 +277,9 @@ namespace VAMMoanPlugin
     public JSONStorableFloat VAMMValue_IntensitiesCount;
 
     public JSONStorableString A_UpdateArousalValue;
+
+    // External calls
+    public JSONStorableFloat VAMM_GlobalOcclusion_lpf;
 
     public override void Init()
     {
@@ -436,7 +442,7 @@ namespace VAMMoanPlugin
         createStaticDescriptionText("Advanced options", "<color=#000><size=35><b>ADVANCED OPTIONS</b></size></color>", false, 40);
 
         // Random Moans trigger
-        enableRandMoanTrigger = new JSONStorableBool("Enable randomized playback", false);
+        enableRandMoanTrigger = new JSONStorableBool("Enable randomized moan playback", false);
         enableRandMoanTrigger.storeType = JSONStorableParam.StoreType.Full;
         CreateToggle(enableRandMoanTrigger, false);
         RegisterBool(enableRandMoanTrigger);
@@ -483,8 +489,8 @@ namespace VAMMoanPlugin
 
         editTriggersList = new List<string>();
         editTriggersList.Add("Select a trigger to edit");
-        editTriggersList.Add("Lip sync");
-        editTriggersList.Add("Smoothed vocal volume");
+        editTriggersList.Add("Fast vocal amplitude");
+        editTriggersList.Add("Smoothed vocal amplitude");
         editTriggersList.Add("Start disabled");
         editTriggersList.Add("Start breathing");
         editTriggersList.Add("Start kissing");
@@ -504,11 +510,11 @@ namespace VAMMoanPlugin
         {
           switch (choice)
           {
-            case "Lip sync":
-              lipSyncTrigger.OpenPanelTransition();
+            case "Vocal amplitude":
+              vocalAmplitudeTrigger.OpenPanelTransition();
               break;
-            case "Smoothed vocal volume":
-              smoothedVolumeTrigger.OpenPanelTransition();
+            case "Smoothed vocal amplitude":
+              smoothedVocalAmplitudeTrigger.OpenPanelTransition();
               break;
             case "Start disabled":
               startDisabledTrigger.OpenPanelActionStart();
@@ -616,7 +622,7 @@ namespace VAMMoanPlugin
         VAMMAutoJaw.val = JawControlAJ.GetBoolParamValue("driveXRotationFromAudioSource"); // Reading the parameters from the normal tabs
         AutoJawMouthMorphsJS.SetBoolParamValue("enabled", VAMMAutoJaw.val); // Also settings the morphs to the same value
 
-        UIDynamicButton setOptimalJawParams = CreateButton("Set optimal auto-jaw parameters", true);
+        UIDynamicButton setOptimalJawParams = CreateButton("Set optimal auto-jaw animation parameters", true);
         if (setOptimalJawParams != null)
         {
           setOptimalJawParams.button.onClick.AddListener(setOptimalJawParamsCallback);
@@ -736,7 +742,7 @@ namespace VAMMoanPlugin
         BJEditAdvOptionsCallback(false);
 
         CreateSpacer(true);
-        
+
         // TITLE MANUAL
         createStaticDescriptionText("Manual mode options", "<color=#000><size=35><b>MANUAL MODE</b></size></color>", true, 40);
 
@@ -1056,6 +1062,14 @@ namespace VAMMoanPlugin
         RegisterFloat(VAMMValue_MaxTriggerCount);
         RegisterFloat(VAMMValue_IntensitiesCount);
 
+        // ***************************************************************
+        // ******* STUFFS FOR EXTERNAL CALLS *****************************
+        // ***************************************************************
+        VAMM_GlobalOcclusion_lpf = new JSONStorableFloat("VAMM Global Occlusion LPF", 22000f, 0f, 22000f) { isStorable = false };
+        VAMM_GlobalOcclusion_lpf.setCallbackFunction += (val) => { onChangeGlobalOcclusionLPF(); };
+
+        RegisterFloat(VAMM_GlobalOcclusion_lpf);
+
         // Initializing my custom animation curves
         initAnimationCurves();
 
@@ -1181,11 +1195,11 @@ namespace VAMMoanPlugin
           {
             clipLoudness += Mathf.Abs(sample);
           }
-					// basically scales samples between 0-1
+          // basically scales samples between 0-1
           clipLoudness *= multiplier;
           clipLoudness /= (float)sampleWindow;
-					// interpolation function with steep ramp up seems to work well
-					clipLoudness = MathHelper.Tanh(1.5f * (clipLoudness - 0.05f));
+          // interpolation function with steep ramp up seems to work well
+          clipLoudness = MathHelper.Tanh(1.5f * (clipLoudness - 0.05f));
           clipLoudness = Mathf.Clamp01(clipLoudness);
         }
 
@@ -1194,11 +1208,11 @@ namespace VAMMoanPlugin
         float smoothingFactor = increasing ? voicePeakSmoothingFactorUp : voicePeakSmoothingFactorDown;
         smoothedVolumeValue = (1f - smoothingFactor) * smoothedVolumeValue + smoothingFactor * targetLoudness;
 
-        smoothedVolumeTrigger.active = true;
-        smoothedVolumeTrigger.TriggerTransition(smoothedVolumeValue);
+        smoothedVocalAmplitudeTrigger.active = true;
+        smoothedVocalAmplitudeTrigger.TriggerTransition(smoothedVolumeValue);
 
-        lipSyncTrigger.active = true;
-        lipSyncTrigger.TriggerTransition(clipLoudness);
+        vocalAmplitudeTrigger.active = true;
+        vocalAmplitudeTrigger.TriggerTransition(clipLoudness);
 
         nextAudioSample = vammTimer + 0.05f;
       }
@@ -1792,11 +1806,11 @@ namespace VAMMoanPlugin
       // Creating all my triggers and adding them to a global list (to easily control them and save them)
       allTriggers = new List<EventTrigger>();
 
-      lipSyncTrigger = new EventTrigger(this, "LipSyncActions");
-      allTriggers.Add(lipSyncTrigger);
+      vocalAmplitudeTrigger = new EventTrigger(this, "LipSyncActions");
+      allTriggers.Add(vocalAmplitudeTrigger);
 
-      smoothedVolumeTrigger = new EventTrigger(this, "SmoothedVolumeActions");
-      allTriggers.Add(smoothedVolumeTrigger);
+      smoothedVocalAmplitudeTrigger = new EventTrigger(this, "SmoothedVolumeActions");
+      allTriggers.Add(smoothedVocalAmplitudeTrigger);
 
       startDisabledTrigger = new EventTrigger(this, "StartDisabledActions");
       allTriggers.Add(startDisabledTrigger);
@@ -1974,6 +1988,9 @@ namespace VAMMoanPlugin
         pelvicSlapAudioSource.minDistance = 1f;
         pelvicSlapAudioSource.maxDistance = 1.5f;
         pelvicSlapAudioSource.reverbZoneMix = _PSLReverbMix;
+
+        pelvicSlapLPF = pslRigidbody01.gameObject.AddComponent<AudioLowPassFilter>();
+        pelvicSlapLPF.cutoffFrequency = 22000.0f;
       }
 
       // Initializing first trigger
@@ -2016,6 +2033,7 @@ namespace VAMMoanPlugin
       if (tmp != null) Destroy(tmp);
 
       if (pelvicSlapAudioSource != null) Destroy(pelvicSlapAudioSource);
+      if (pelvicSlapLPF != null) Destroy(pelvicSlapLPF);
       pelvicSlapAudioSource = null;
 
       if (_PSLTrigger01 != null) Destroy(_PSLTrigger01);
@@ -2117,6 +2135,9 @@ namespace VAMMoanPlugin
         if (labTrig != null)
         {
           squishesAudioSource = labTrig.gameObject.AddComponent<AudioSource>();
+
+          squishesLPF = labTrig.gameObject.AddComponent<AudioLowPassFilter>();
+          squishesLPF.cutoffFrequency = 22000.0f;
         }
 
         labTrig.gameObject.AddComponent<SexTriggerCollide>().OnTrigger += LabTrigObserver;
@@ -2133,6 +2154,8 @@ namespace VAMMoanPlugin
         if (penTrig01 != null)
         {
           squishesAudioSource = penTrig01.gameObject.AddComponent<AudioSource>();
+          squishesLPF = penTrig01.gameObject.AddComponent<AudioLowPassFilter>();
+          squishesLPF.cutoffFrequency = 22000.0f;
         }
 
       }
@@ -2170,6 +2193,7 @@ namespace VAMMoanPlugin
       }
 
       if (squishesAudioSource != null) Destroy(squishesAudioSource);
+      if (squishesLPF != null) Destroy(squishesLPF);
       squishesAudioSource = null;
     }
 
@@ -2200,6 +2224,9 @@ namespace VAMMoanPlugin
         mouthAudioSource.minDistance = 1f;
         mouthAudioSource.maxDistance = 1.5f;
         mouthAudioSource.reverbZoneMix = _BJReverbMix;
+
+        mouthLPF = mouTrig.gameObject.AddComponent<AudioLowPassFilter>();
+        mouthLPF.cutoffFrequency = 22000.0f;
       }
 
       mouTrig.gameObject.AddComponent<SexTriggerCollide>().OnTrigger += MouTrigObserver;
@@ -2216,6 +2243,7 @@ namespace VAMMoanPlugin
       if (tmp != null) Destroy(tmp);
 
       if (mouthAudioSource != null) Destroy(mouthAudioSource);
+      if (mouthLPF != null) Destroy(mouthLPF);
       mouthAudioSource = null;
     }
 
@@ -2513,6 +2541,13 @@ namespace VAMMoanPlugin
         JawControlAJ.SetFloatParamValue("driveXRotationFromAudioSourceAdditionalAngle", float.Parse(voice.voiceConfig["config"]["settings"]["audioDriveExtraAngle"].Value));
         JawControlAJ.SetFloatParamValue("driveXRotationFromAudioSourceMaxAngle", float.Parse(voice.voiceConfig["config"]["settings"]["audioDriveMaxAngle"].Value));
       }
+    }
+
+    protected void onChangeGlobalOcclusionLPF()
+    {
+      if (mouthLPF != null) mouthLPF.cutoffFrequency = VAMM_GlobalOcclusion_lpf.val;
+      if (squishesLPF != null) squishesLPF.cutoffFrequency = VAMM_GlobalOcclusion_lpf.val;
+      if (pelvicSlapLPF != null) pelvicSlapLPF.cutoffFrequency = VAMM_GlobalOcclusion_lpf.val;
     }
 
     // **************************
@@ -2981,7 +3016,7 @@ namespace VAMMoanPlugin
         if (myNeedInit)
         {
           triggerActionsPanel.Find("Panel/Header Text").GetComponent<Text>().text = Name;
-          triggerActionsPanel.Find("Content/Tab2/Label").GetComponent<Text>().text = "Value Actions";
+          triggerActionsPanel.Find("Content/Tab2/Label").GetComponent<Text>().text = "Actions";
           triggerActionsPanel.Find("Content/Tab1").gameObject.SetActive(false);
           triggerActionsPanel.Find("Content/Tab2").gameObject.SetActive(true);
           triggerActionsPanel.Find("Content/Tab2").GetComponent<Toggle>().isOn = true;
